@@ -135,3 +135,161 @@ export const personality: ResponsePattern[] = [
     mood: 'CONFUS'
   }
 ];
+
+// ============================
+// New features support (v1)
+// - reply / quote
+// - reactions
+// - "typing" streaming style responses
+// ============================
+
+export type ReactionKey = "👍" | "😂" | "🔥" | "❤️" | "😮";
+
+export type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: number;
+  replyToId?: string;
+  reactions?: Partial<Record<ReactionKey, number>>;
+};
+
+export function uid(): string {
+  return (globalThis.crypto as any)?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+}
+
+export function pickResponse(userText: string): { text: string; mood: Mood } {
+  const input = (userText ?? "").trim();
+
+  for (const pattern of personality) {
+    if (pattern.trigger.test(input)) {
+      const answers = pattern.answers;
+      const idx = Math.floor(Math.random() * answers.length);
+      return { text: answers[idx] ?? answers[0] ?? "…", mood: pattern.mood };
+    }
+  }
+
+  // Should never happen because of /.*/ fallback
+  return { text: "…", mood: "CONFUS" };
+}
+
+/**
+ * Streaming helper: calls `onChunk` with small increments to simulate a bot typing.
+ * You can swap this later with a real backend stream.
+ */
+export async function streamBotAnswer(
+  userText: string,
+  signal: AbortSignal,
+  onChunk: (chunk: string) => void
+): Promise<{ mood: Mood }>
+{
+  const { text, mood } = pickResponse(userText);
+  const chunks = text.match(/.{1,6}/g) ?? [text];
+
+  for (const c of chunks) {
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    onChunk(c);
+    await new Promise((r) => setTimeout(r, 25));
+  }
+
+  return { mood };
+}
+
+// ============================
+// Better answers (v2) - context + variety + anti-repeat
+// Keeps v1 intact.
+// ============================
+
+let __lastBotAnswer = "";
+
+function pick<T>(arr: T[]) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function maybe(prob = 0.3) {
+  return Math.random() < prob;
+}
+
+function normalize(s: string) {
+  return (s ?? "").trim().replace(/\s+/g, " ");
+}
+
+function tooSimilar(a: string, b: string) {
+  const A = normalize(a).toLowerCase();
+  const B = normalize(b).toLowerCase();
+  if (!A || !B) return false;
+  if (A === B) return true;
+  const shorter = A.length < B.length ? A : B;
+  const longer = A.length < B.length ? B : A;
+  return longer.includes(shorter) && Math.abs(longer.length - shorter.length) < 24;
+}
+
+function formatBotReply(base: string, mood: Mood, recentUserTexts: string[]) {
+  const lastUser = recentUserTexts.at(-1) ?? "";
+
+  const intros: Record<string, string[]> = {
+    PHILOSOPHE: ["Hmm…", "Considère ceci :", "Dans le fond…", "Écoute."],
+    VEXÉ: ["Bon.", "Encore.", "Sérieusement ?", "D'accord."],
+    CONFUS: ["Attends…", "Je…", "Hein ?", "Ok, donc…"],
+    POÈTE: ["Oh.", "Écoute la brise :", "Sous la lune…", "Mmm…"],
+    MÉPRISANT: ["Évidemment.", "Classique.", "On a vu mieux.", "Allons-y."],
+    GOUROU: ["Approche.", "Respire.", "Voici la voie :", "Suis-moi :"],
+  };
+
+  const openers = intros[mood] ?? ["Ok."];
+  const intro = pick(openers);
+
+  const softEmojis = ["✨", "😼", "👌", "🔧", "🧠", "🪄"]; // léger
+  const maybeEmoji = maybe(0.25) ? " " + pick(softEmojis) : "";
+
+  const followups = [
+    "Tu veux que je te fasse une version courte ou détaillée ?",
+    "Tu préfères du code direct ou une liste d'étapes ?",
+    "Tu veux un rendu 'propre' ou 'chaos stylé' ?",
+    "On améliore l'UI ou le cerveau en premier ?",
+  ];
+
+  let out = `${intro}${maybeEmoji}\n\n${base}`.trim();
+
+  // Petite contextualisation parfois
+  if (maybe(0.25) && lastUser) {
+    out += `\n\n*(Je note: “${lastUser.slice(0, 80)}”) *`;
+  }
+
+  // Relance parfois
+  if (maybe(0.3)) {
+    out += `\n\n${pick(followups)}`;
+  }
+
+  return out.trim();
+}
+
+/**
+ * V2: context-aware streaming answer.
+ * Pass the last user messages (recentUserTexts) to get less repetitive, more coherent replies.
+ */
+export async function streamBotAnswerWithContext(
+  userText: string,
+  recentUserTexts: string[],
+  signal: AbortSignal,
+  onChunk: (chunk: string) => void
+): Promise<{ mood: Mood }> {
+  const { text: base, mood } = pickResponse(userText);
+
+  let finalText = formatBotReply(base, mood, recentUserTexts);
+
+  // Anti-repeat
+  if (tooSimilar(finalText, __lastBotAnswer)) {
+    finalText = formatBotReply(base + "\n\n(Je te le dis autrement.)", mood, recentUserTexts);
+  }
+  __lastBotAnswer = finalText;
+
+  const chunks = finalText.match(/.{1,6}/g) ?? [finalText];
+  for (const c of chunks) {
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    onChunk(c);
+    await new Promise((r) => setTimeout(r, 22));
+  }
+
+  return { mood };
+}
