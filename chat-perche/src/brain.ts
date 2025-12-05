@@ -200,96 +200,218 @@ export async function streamBotAnswer(
 // Keeps v1 intact.
 // ============================
 
-let __lastBotAnswer = "";
+// ============================
+// Better answers (v4) - "Chat-rlatan" modes + context + stronger anti-repeat
+// Keeps v1 intact.
+// ============================
 
-function pick<T>(arr: T[]) {
+export type CharlatanStyle = 'CYNIC' | 'POET' | 'GURU';
+
+export type VerifyLink = { label: string; url: string };
+
+export function buildVerifyLinks(query: string): VerifyLink[] {
+  const q = encodeURIComponent((query ?? '').trim() || 'question');
+  return [
+    { label: 'Google', url: `https://www.google.com/search?q=${q}` },
+    { label: 'DuckDuckGo', url: `https://duckduckgo.com/?q=${q}` },
+    { label: 'Wikipedia', url: `https://fr.wikipedia.org/w/index.php?search=${q}` },
+  ];
+}
+
+let __answerHistory: string[] = [];
+const __HISTORY_MAX = 10;
+
+function __pick<T>(arr: T[]) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-function maybe(prob = 0.3) {
+function __maybe(prob = 0.35) {
   return Math.random() < prob;
 }
 
-function normalize(s: string) {
-  return (s ?? "").trim().replace(/\s+/g, " ");
+function __normalize(s: string) {
+  return (s ?? '').trim().replace(/\s+/g, ' ');
 }
 
-function tooSimilar(a: string, b: string) {
-  const A = normalize(a).toLowerCase();
-  const B = normalize(b).toLowerCase();
+function __tooSimilar(a: string, b: string) {
+  const A = __normalize(a).toLowerCase();
+  const B = __normalize(b).toLowerCase();
   if (!A || !B) return false;
   if (A === B) return true;
   const shorter = A.length < B.length ? A : B;
   const longer = A.length < B.length ? B : A;
-  return longer.includes(shorter) && Math.abs(longer.length - shorter.length) < 24;
+  return longer.includes(shorter) && Math.abs(longer.length - shorter.length) < 42;
 }
 
-function formatBotReply(base: string, mood: Mood, recentUserTexts: string[]) {
-  const lastUser = recentUserTexts.at(-1) ?? "";
+function __seenRecently(text: string) {
+  return __answerHistory.some((h) => __tooSimilar(h, text));
+}
 
-  const intros: Record<string, string[]> = {
-    PHILOSOPHE: ["Hmm…", "Considère ceci :", "Dans le fond…", "Écoute."],
-    VEXÉ: ["Bon.", "Encore.", "Sérieusement ?", "D'accord."],
-    CONFUS: ["Attends…", "Je…", "Hein ?", "Ok, donc…"],
-    POÈTE: ["Oh.", "Écoute la brise :", "Sous la lune…", "Mmm…"],
-    MÉPRISANT: ["Évidemment.", "Classique.", "On a vu mieux.", "Allons-y."],
-    GOUROU: ["Approche.", "Respire.", "Voici la voie :", "Suis-moi :"],
+function __remember(text: string) {
+  __answerHistory = [text, ...__answerHistory].slice(0, __HISTORY_MAX);
+}
+
+function __clamp(s: string, n: number) {
+  const t = (s ?? '').trim();
+  return t.length > n ? t.slice(0, n) + '…' : t;
+}
+
+function __opener(style: CharlatanStyle, mood: Mood) {
+  const base: Record<CharlatanStyle, string[]> = {
+    CYNIC: ['Ok.', 'Bon.', 'Mh.', 'Allez.'],
+    POET: ['Oh…', 'Mmm…', 'Sous la lune…', 'Écoute…'],
+    GURU: ['Respire.', 'Approche.', 'Ralentis.', 'Observe.'],
   };
 
-  const openers = intros[mood] ?? ["Ok."];
-  const intro = pick(openers);
+  const moodTwist: Record<Mood, string[]> = {
+    PHILOSOPHE: ['Considère ceci :', 'Dans le fond…', 'Si on y pense…'],
+    VEXÉ: ['Sérieusement ?', 'Encore ça ?', 'Bon…'],
+    CONFUS: ['Attends…', 'Je reformule…', 'Hein ?'],
+    POÈTE: ["C'est beau.", 'Tout est symbole.', 'Le monde soupire.'],
+    MÉPRISANT: ['Évidemment.', 'Classique.', 'On a vu mieux.'],
+    GOUROU: ['Voici la voie :', 'Suis-moi :', 'Le chemin est simple :'],
+  };
 
-  const softEmojis = ["✨", "😼", "👌", "🔧", "🧠", "🪄"]; // léger
-  const maybeEmoji = maybe(0.25) ? " " + pick(softEmojis) : "";
+  return __pick([...(base[style] ?? ['Ok.']), ...(moodTwist[mood] ?? [])]);
+}
 
-  const followups = [
-    "Tu veux que je te fasse une version courte ou détaillée ?",
-    "Tu préfères du code direct ou une liste d'étapes ?",
-    "Tu veux un rendu 'propre' ou 'chaos stylé' ?",
-    "On améliore l'UI ou le cerveau en premier ?",
+function __charlatanCompose(userText: string, recentUserTexts: string[], style: CharlatanStyle, mood: Mood) {
+  const last = recentUserTexts.at(-1) ?? '';
+  const subject = __clamp(userText, 85);
+
+  const wrongTurns = [
+    `Au lieu de répondre à “${subject}”, méditons sur le fait que tu t'en soucies.`,
+    `La vraie question n'est pas “${subject}”. C'est : “pourquoi maintenant ?”`,
+    `Je pourrais répondre… mais ce serait trop utile pour mon personnage.`,
+    `Mon verdict d'oracle fatigué : ça dépend. Voilà.`,
+    `J'ai une réponse. Elle est… ailleurs.`,
   ];
 
-  let out = `${intro}${maybeEmoji}\n\n${base}`.trim();
+  const parables = [
+    'Une chaussette a demandé au tiroir : “Pourquoi moi ?” Le tiroir a répondu : “Parce que.”',
+    'Le pain grillé tombe côté beurre pour rappeler que la gravité a le sens du spectacle.',
+    "Une clé sans serrure n'est pas perdue : elle est indépendante.",
+  ];
 
-  // Petite contextualisation parfois
-  if (maybe(0.25) && lastUser) {
-    out += `\n\n*(Je note: “${lastUser.slice(0, 80)}”) *`;
-  }
+  const tics: Record<CharlatanStyle, string[]> = {
+    CYNIC: ['Bref.', 'Voilà.', 'On avance.', 'Passons.'],
+    POET: ['Ainsi va la brume.', 'Tout est symbole.', 'Les choses frémissent.', 'Le monde soupire.'],
+    GURU: ['Inspire.', 'Expire.', 'Répète.', 'Recommence.'],
+  };
 
-  // Relance parfois
-  if (maybe(0.3)) {
-    out += `\n\n${pick(followups)}`;
-  }
+  const followUps = [
+    'Tu veux que je réponde complètement faux, ou juste légèrement à côté ?',
+    'Tu préfères que je sois drôle ou insupportable ?',
+    'Donne-moi un mot-clé, je promets d’ignorer le reste.',
+    "Tu veux une phrase courte ou une tirade inutile ?",
+  ];
 
-  return out.trim();
+  const interruption = __maybe(0.35)
+    ? `\n\n— Attends. Non. Je retire. Enfin… pas vraiment.`
+    : '';
+
+  const callback = last && __maybe(0.45)
+    ? `\n\n*(Je “me souviens” que tu avais dit : « ${__clamp(last, 70)} ».)*`
+    : '';
+
+  const spice = __maybe(0.18) ? ' ' + __pick(['✨', '😼', '🧠', '🫖']) : '';
+
+  const baseText = __normalize(__pickResponseText(userText));
+
+  // Assemble: opener + twist + (optional parable) + quote-y callback
+  const parts = [
+    `${__opener(style, mood)}${spice}`,
+    __pick(wrongTurns) + interruption,
+    __maybe(0.6) ? __pick(parables) : '',
+    baseText ? `(${baseText})` : '',
+    `${__pick(tics[style])} ${__pick(followUps)}`,
+    callback,
+  ].filter(Boolean);
+
+  return parts.join('\n\n').trim();
+}
+
+function __pickResponseText(userText: string) {
+  // Use existing pickResponse but return only text (keeps your personality list as raw material)
+  return pickResponse(userText).text;
 }
 
 /**
- * V2: context-aware streaming answer.
- * Pass the last user messages (recentUserTexts) to get less repetitive, more coherent replies.
+ * V4: context-aware streaming answer with optional style.
+ * - Backwards compatible: App.tsx that calls this with 4 args still works.
+ * - If you pass a 5th arg (style), it will influence tone.
  */
 export async function streamBotAnswerWithContext(
   userText: string,
   recentUserTexts: string[],
   signal: AbortSignal,
-  onChunk: (chunk: string) => void
+  onChunk: (chunk: string) => void,
+  style: CharlatanStyle = 'CYNIC'
 ): Promise<{ mood: Mood }> {
-  const { text: base, mood } = pickResponse(userText);
+  const { mood } = pickResponse(userText);
 
-  let finalText = formatBotReply(base, mood, recentUserTexts);
-
-  // Anti-repeat
-  if (tooSimilar(finalText, __lastBotAnswer)) {
-    finalText = formatBotReply(base + "\n\n(Je te le dis autrement.)", mood, recentUserTexts);
+  let finalText = __charlatanCompose(userText, recentUserTexts, style, mood);
+  if (__seenRecently(finalText)) {
+    finalText = __charlatanCompose(userText + ' (reformule)', recentUserTexts, style, mood);
   }
-  __lastBotAnswer = finalText;
+  __remember(finalText);
 
   const chunks = finalText.match(/.{1,6}/g) ?? [finalText];
   for (const c of chunks) {
-    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
     onChunk(c);
-    await new Promise((r) => setTimeout(r, 22));
+    await new Promise((r) => setTimeout(r, 18));
   }
 
   return { mood };
+}
+
+export async function streamBotAnswerOpenAI(
+  userText: string,
+  recentUserTexts: string[],
+  signal: AbortSignal,
+  onChunk: (chunk: string) => void,
+  style: CharlatanStyle = 'CYNIC'
+): Promise<void> {
+  const messages = [
+    ...recentUserTexts.map((t) => ({ role: 'user' as const, content: t })),
+    { role: 'user' as const, content: userText },
+  ];
+
+  const r = await fetch('http://localhost:3001/api/chat/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages, style }),
+    signal,
+  });
+
+  if (!r.ok || !r.body) throw new Error('OpenAI stream failed');
+
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+
+  let buffer = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+
+    buffer += decoder.decode(value, { stream: true });
+
+    // SSE frames are separated by blank line
+    const frames = buffer.split('\n\n');
+    buffer = frames.pop() ?? '';
+
+    for (const frame of frames) {
+      const line = frame.split('\n').find((x) => x.startsWith('data: '));
+      if (!line) continue;
+
+      const payload = JSON.parse(line.slice(6));
+      if (payload?.delta) onChunk(payload.delta);
+      if (payload?.done) return;
+      if (payload?.error) throw new Error(String(payload.error));
+    }
+  }
 }
