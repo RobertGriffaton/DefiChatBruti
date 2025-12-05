@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { streamBotAnswerWithContext, uid, type ReactionKey } from './brain';
-
+import { streamBotAnswerWithContext, streamBotAnswerOpenAI, buildVerifyLinks, uid, type ReactionKey, type CharlatanStyle } from './brain';
 type Msg = {
   id: string;
   text: string;
@@ -10,6 +9,7 @@ type Msg = {
   reactions?: Partial<Record<ReactionKey, number>>;
   deleted?: boolean;
   edited?: boolean;
+  links?: { label: string; url: string }[];
 };
 
 const REACTIONS: ReactionKey[] = ['👍', '😂', '🔥', '❤️', '😮'];
@@ -34,6 +34,8 @@ function App() {
   const [replyToId, setReplyToId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  const [style, setStyle] = useState<CharlatanStyle>('CYNIC');
+  const [llmMode, setLlmMode] = useState<'LOCAL' | 'OPENAI'>('LOCAL');
 
   // Streaming control
   const abortRef = useRef<AbortController | null>(null);
@@ -172,6 +174,7 @@ function App() {
       isBot: true,
       createdAt: Date.now() + 1,
       reactions: {},
+      links: buildVerifyLinks(userText),
     };
 
     setMessages((prev) => [...prev, userMsg, botMsg]);
@@ -191,13 +194,24 @@ function App() {
         .slice(-6)
         .map((m) => m.text);
 
-      await streamBotAnswerWithContext(userText, recentUserTexts, ac.signal, (chunk) => {
+      const onChunk = (chunk: string) => {
         setMessages((prev) =>
           prev.map((m) => (m.id === botId ? { ...m, text: m.text + chunk } : m))
         );
         onNewMessage();
-      });
-    } catch (e: any) {
+      };
+
+      if (llmMode === 'OPENAI') {
+        await streamBotAnswerOpenAI(userText, recentUserTexts, ac.signal, onChunk, style);
+      } else {
+        await streamBotAnswerWithContext(userText, recentUserTexts, ac.signal, (chunk) => {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === botId ? { ...m, text: m.text + chunk } : m))
+          );
+          onNewMessage();
+        }, style);
+      }  // ✅ CETTE LIGNE manquait
+      } catch (e: any) {
       if (e?.name === 'AbortError') {
         // keep what was generated so far
       } else {
@@ -243,6 +257,41 @@ function App() {
               <span className="text-xl">🐱</span>
             </div>
             <h1 className="text-xs font-semibold text-gray-900">Chat Perché</h1>
+            <div className="mt-1 flex gap-1">
+              {(['CYNIC', 'POET', 'GURU'] as CharlatanStyle[]).map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setStyle(s)}
+                  className={`text-[10px] px-2 py-0.5 rounded-full border ${
+                    style === s
+                      ? 'bg-black text-white border-black'
+                      : 'bg-white text-gray-700 border-gray-300'
+                  }`}
+                  type="button"
+                  title={`Style: ${s}`}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+
+            <div className="mt-1 flex gap-1">
+              {(['LOCAL', 'OPENAI'] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setLlmMode(m)}
+                  className={`text-[10px] px-2 py-0.5 rounded-full border ${
+                    llmMode === m
+                      ? 'bg-[#007AFF] text-white border-[#007AFF]'
+                      : 'bg-white text-gray-700 border-gray-300'
+                  }`}
+                  type="button"
+                  title={`Mode: ${m}`}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div className="flex items-center gap-2">
@@ -367,6 +416,22 @@ function App() {
                       </div>
                     </div>
                   </div>
+
+                  {msg.isBot && msg.links?.length ? (
+                    <div className="mt-1 flex flex-wrap gap-2">
+                      {msg.links.map((l) => (
+                        <a
+                          key={l.url}
+                          href={l.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[11px] px-2 py-1 rounded-full bg-gray-100 border border-gray-200 text-blue-700"
+                        >
+                          🔎 {l.label}
+                        </a>
+                      ))}
+                    </div>
+                  ) : null}
 
                   {/* reaction pills */}
                   {msg.reactions && (
